@@ -5,11 +5,15 @@ main program for spike sorting
 
 from __future__ import print_function, division, absolute_import
 import os
+import math
+from time import strftime
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
+
 # pylint:   disable=E1101
 from .. import SortingManager, SessionManager, options
-from time import strftime
-from getpass import getuser
 
 import matplotlib.pyplot as mpl
 
@@ -20,43 +24,46 @@ from .cluster_features import cluster_features, read_results
 from .dist import template_match
 from .artifacts import find_artifacts
 from .plot_temp import plot_temperatures
+from .handle_random_seed import handle_random_seed
 
 
-USER = getuser()
-LOG_FNAME = 'log.txt'
 FIRST_MATCH_FACTOR = options['FirstMatchFactor']
+SEED = None
 
 
 def features_to_index(features, folder, name, overwrite=True):
     """
     wrapper function
     """
+    # logger.debug('features_to_index called: folder=%s, name=%s', folder, name)  # Log function cal
+
+    # Handle seed incase the entry point is not argument_parser
+    global SEED
+    if SEED is None:
+        SEED = handle_random_seed()
+
     clu = None
 
     if not overwrite:
         try:
             clu, tree = read_results(folder, name)
-            print('Read clustering results from ' + folder)
-        except IOError:  # as error:
-            print('Starting clustering ')
-            # + error.strerror + ': ' + error.filename)
+            logger.info('Read clustering results from %s', folder)
+        except IOError:
+            logger.info('Starting clustering in %s', folder)
             overwrite = True
 
     if clu is not None:
         if features.shape[0] != clu.shape[1] - 2:
-            print('Read outdated clustering, restarting')
+            logger.info('Read outdated clustering, restarting')
             overwrite = True
 
     if overwrite:
         feat_idx = select_features(features)
-        print('Clustering data in {}/{}'.format(folder, name))
-        cluster_features(features[:, feat_idx], folder, name)
-        now = strftime('%Y-%m-%d_%H-%M-%S')
+        logger.info('Clustering data in %s/%s', folder, name)
 
-        log_fname = os.path.join(folder, LOG_FNAME)
-        with open(log_fname, 'a') as fid_done:
-            fid_done.write('{} {} ran {}\n'.format(now, USER, name))
-        fid_done.close()
+        cluster_features(features[:, feat_idx], folder, name, SEED)
+
+        logger.info('Clustering run completed: folder=%s, name=%s', folder, name)
 
         clu, tree = read_results(folder, name)
 
@@ -68,6 +75,7 @@ def cluster_step(features, folder, sub_name, overwrite):
     """
     one step in clustering
     """
+    # logger.debug('cluster_step called: sub_name=%s', sub_name)  # Log function call
 
     res_idx, tree, used_points = features_to_index(features,
                                                    folder,
@@ -81,9 +89,9 @@ def cluster_step(features, folder, sub_name, overwrite):
         mpl.close(temp_fig)
 
     if options['Debug']:
-        print('Cluster step {} returned'.format(sub_name))
+        logger.debug('Cluster step %s returned', sub_name)
         for clid in np.unique(res_idx):
-            print('{}: {} spikes'.format(clid, (res_idx == clid).sum()))
+            logger.debug('  %d: %d spikes', clid, (res_idx == clid).sum())
 
     return res_idx
 
@@ -91,7 +99,10 @@ def cluster_step(features, folder, sub_name, overwrite):
 def iterative_sorter(features, spikes, n_iterations, name, overwrite=True):
     """
     name is used to generate temporary filenames
-    """
+    """ 
+    # logger.debug('iterative_sorter called: name=%s, n_iterations=%d, n_spikes=%d',
+    #              name, n_iterations, features.shape[0]) # Log function call
+
     idx = np.zeros(features.shape[0], np.uint16)
     match_idx = np.zeros(features.shape[0], bool)
 
@@ -104,20 +115,18 @@ def iterative_sorter(features, spikes, n_iterations, name, overwrite=True):
 
         if sub_idx.sum() < options['MinInputSize']:
             if options['Debug']:
-                print('Stopping iteration, {} spikes left'
-                      .format(sub_idx.sum()))
+                logger.debug('Stopping iteration, %d spikes left', sub_idx.sum())
             break
 
         if options['Debug']:
-            print('Clustering {} spikes'.format(sub_idx.sum()))
+            logger.debug('Clustering %d spikes', sub_idx.sum())
 
         # res_idx contains a number for each cluster generated from clustering
         res_idx = cluster_step(features[sub_idx], name, sub_name, overwrite)
 
         if options['Debug']:
-            print('Iteration {}, new classes: {}'.
-                  format(i, np.unique(res_idx)))
-            print('Iteration {}, old classes: {}'.format(i, np.unique(idx)))
+            logger.debug('Iteration %d, new classes: %s', i, np.unique(res_idx))
+            logger.debug('Iteration %d, old classes: %s', i, np.unique(idx))
 
         clustered_idx = res_idx > 0
         prev_idx_max = idx.max()
@@ -136,14 +145,14 @@ def iterative_sorter(features, spikes, n_iterations, name, overwrite=True):
 
                 if cluster_size < options['MinInputSizeRecluster']:
                     if options['Debug']:
-                        print('Not reclustering cluster {} ({} spikes)'
-                              .format(clid, cluster_size))
+                        logger.debug('Not reclustering cluster %d (%d spikes)',
+                                     clid, cluster_size)
                     continue
 
                 else:
                     if options['Debug']:
-                        print('Reclustering cluster {} ({} spikes)'
-                              .format(clid, cluster_size))
+                        logger.debug('Reclustering cluster %d (%d spikes)',
+                                     clid, cluster_size)
 
                 sub_sub_name = '{}_{:02d}'.format(sub_name, clid)
 
@@ -165,9 +174,11 @@ def sort_spikes(spikes, folder, overwrite=False, sign='pos'):
     """
     function organizes code
     """
+    # logger.debug('sort_spikes called: folder=%s, sign=%s', folder, sign)    # Log function call
+
     n_iterations = options['RecursiveDepth']
     if options['Debug']:
-        print('Recursive depth is {}.'.format(n_iterations))
+        logger.debug('Recursive depth is %d.', n_iterations)
 
     # it is suboptimal that we calculate the features
     # even when reading clusters from disk
@@ -194,6 +205,9 @@ def main(data_fname, session_fname, sign, overwrite=False):
     """
     sort spikes from given session
     """
+    # logger.debug('main called: data=%s, session=%s, sign=%s',
+    #              data_fname, session_fname, sign)   # Log function call
+
     sort_man = SortingManager(data_fname)
     session = SessionManager(session_fname)
     idx = session.index
@@ -201,6 +215,11 @@ def main(data_fname, session_fname, sign, overwrite=False):
     sort_idx, match_idx, artifact_ids =\
         sort_spikes(spikes, session.session_dir,
                     overwrite=overwrite, sign=sign)
+
+    # Write random seed to session folder for reproducibility
+    seed_file = os.path.join(session.session_dir, 'random_seed.txt')
+    with open(seed_file, 'a') as f:
+        f.write('{} | {}\n'.format(strftime('%Y-%m-%d_%H-%M-%S'), SEED))
 
     all_ids = np.unique(sort_idx)
 
@@ -221,27 +240,27 @@ def sort_helper(args):
     """
     usual multiprocessing helper, used to un
     """
+    # logger.debug('sort_helper called: %s', args)    # Log function call
+
     main(args[0], args[2], args[1], options['overwrite'])
 
 
-def write_options(fname='css-cluster-log.txt'):
+def write_options():
     """
-    save options to log file
+    Log all current clustering options.
     """
-    print('Writing options to file {}'.format(fname))
-    msg = strftime('%Y-%m-%d_%H-%M-%S') + ' ' + USER + '\n'
+    # logger.debug('write_options called')    # Log function call
 
+    # Remove old session_random_seeds.txt if exists (legacy cleanup)
+    if os.path.exists('session_random_seeds.txt'):
+        os.remove('session_random_seeds.txt')
+        logger.info('Old session_random_seeds.txt has been deleted.')
+
+    logger.info('Clustering options:')
     for key in sorted(options.keys()):
-        if key in ['density_hist_bins', 'cmap']:
+        if key in ('density_hist_bins', 'cmap'):
             continue
-        msg += '{}: {}\n'.format(key, options[key])
-
-    msg += 60 * '-' + '\n'
-
-    with open(fname, 'a') as fid:
-        fid.write(msg)
-
-    fid.close()
+        logger.info('  %s: %s', key, options[key])
 
 
 def test_joblist(joblist):
@@ -249,6 +268,8 @@ def test_joblist(joblist):
     simple test to detect whether the same job is
     requested more than once
     """
+    # logger.debug('test_joblist called: %d jobs', len(joblist))   # Log function call
+
     unique_joblist = set(joblist)
     if len(joblist) != len(unique_joblist):
         # there are duplicates!
@@ -261,7 +282,7 @@ def test_joblist(joblist):
 
         for key, val in counter.items():
             if val > 1:
-                print('Job {} requested {} times'.format(key, val))
+                logger.warning('Job %s requested %d times', key, val)
         raise ValueError('Duplicate jobs requested')
 
 
@@ -269,6 +290,8 @@ def argument_parser():
     """
     standard argument parsing
     """
+    # logger.debug('argument_parser called')   # Log function call
+
     from argparse import ArgumentParser, FileType, ArgumentError
     from multiprocessing import Pool, cpu_count
     parser = ArgumentParser('css-cluster',
@@ -280,8 +303,8 @@ def argument_parser():
     parser.add_argument('--jobs', type=FileType('r'))
     parser.add_argument('--datafile', nargs=1)
     parser.add_argument('--sessions', nargs='+')
-
     parser.add_argument('--single', default=False, action='store_true')
+    parser.add_argument('--rng', type=float, default=None, help='Random seed for clustering')
 
     # possibilities:
     # 1) jobs is supplied, and neither datafile nor session
@@ -289,17 +312,23 @@ def argument_parser():
 
     args = parser.parse_args()
 
+    # Use the passed seed if provided, otherwise generate one
+    global SEED
+    if args.rng is None or math.isnan(args.rng):
+        SEED = handle_random_seed()
+    else:
+        SEED = handle_random_seed(args.rng)
+
+
     if args.jobs is None:
         if None in (args.datafile, args.sessions):
             raise ArgumentError(args.jobs,
                                 'Specify either jobs or datafile and sessions')
-
         else:
             joblist = []
             for session in args.sessions:
                 sign = 'neg' if 'neg' in session else 'pos'
                 joblist.append([args.datafile[0], sign, session])
-
     else:
         jobdata = args.jobs.read().splitlines()
         joblist = tuple((tuple(line.split()) for line in jobdata))
@@ -307,8 +336,7 @@ def argument_parser():
 
     n_cores = 1 if args.single else cpu_count() + 1
 
-    print('Starting {} jobs with {} workers'.
-          format(len(joblist), n_cores))
+    logger.info('Starting %d jobs with %d workers', len(joblist), n_cores)
 
     write_options()
 

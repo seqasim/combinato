@@ -5,8 +5,11 @@ from __future__ import print_function, division, absolute_import
 import os
 import time
 import subprocess
+import logging
 import numpy as np
 #   pylint:disable=E1101
+
+logger = logging.getLogger(__name__)
 
 from .. import options
 
@@ -30,7 +33,8 @@ def _cleanup(base, ext):
             os.remove(name)
 
 
-def cluster_features(features, folder, name):
+
+def cluster_features(features, folder, name, random_seed=None):
     """
     folder to store temporary files
     name to generate temporary file names
@@ -52,7 +56,7 @@ def cluster_features(features, folder, name):
 
     argument_fname = name + "_cluster.run"
     run_fname = os.path.join(folder, argument_fname)
-
+    
     with open(run_fname, "w") as fid:
         fid.write('NumberOfPoints: %i\n' % features.shape[0])
         fid.write('DataFile: %s\n' % data_fname)
@@ -68,8 +72,8 @@ def cluster_features(features, folder, name):
         fid.write('SaveSuscept|\n')
         fid.write('WriteLables|\n')
         fid.write('WriteCorFile~\n')
-        fid.write('ForceRandomSeed: %f\n' % (np.random.random() * 2**32))
-
+        #fid.write('ForceRandomSeed: %f\n' % np.random.random() * 2**32)
+        fid.write('ForceRandomSeed: %f\n' % random_seed)
     fid.close()
 
     if options['ShowSPCOutput']:
@@ -92,9 +96,8 @@ def cluster_features(features, folder, name):
         raise Exception('Error in Clustering: ' + name)
 
     if DO_TIMING:
-        with open(os.path.join(folder, 'cluster_log.txt'), 'a') as log_fid:
-            log_fid.write('clustered {} spikes in {:.6f} s'.
-                          format(features.shape[0], dt))
+        logger.debug('clustered: %d spikes in %.3f seconds',
+                    features.shape[0], dt)
 
     if DO_CLEAN:
         _cleanup(cleanname, EXT_TMP)
